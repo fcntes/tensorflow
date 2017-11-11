@@ -28,6 +28,7 @@ See the @{$python/summary} guide.
 @@merge
 @@merge_all
 @@get_summary_description
+@@PluginAsset
 @@get_plugin_asset
 @@get_all_plugin_assets
 """
@@ -35,9 +36,6 @@ See the @{$python/summary} guide.
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
-import contextlib as _contextlib
-import re as _re
 
 from google.protobuf import json_format as _json_format
 
@@ -50,16 +48,16 @@ from tensorflow.core.util.event_pb2 import SessionLog
 from tensorflow.core.util.event_pb2 import TaggedRunMetadata
 # pylint: enable=unused-import
 
+from tensorflow.python.eager import context as _context
 from tensorflow.python.framework import dtypes as _dtypes
 from tensorflow.python.framework import ops as _ops
 from tensorflow.python.ops import gen_logging_ops as _gen_logging_ops
+from tensorflow.python.ops import summary_op_util as _summary_op_util
 
-# exports tensor_summary
+# exports tensor-related summaries
 # pylint: disable=unused-import
 from tensorflow.python.ops.summary_ops import tensor_summary
 # pylint: enable=unused-import
-
-from tensorflow.python.platform import tf_logging as _logging
 
 # exports text
 # pylint: disable=unused-import
@@ -74,74 +72,6 @@ from tensorflow.python.summary.writer.writer_cache import FileWriterCache
 
 from tensorflow.python.util import compat as _compat
 from tensorflow.python.util.all_util import remove_undocumented
-
-
-def _collect(val, collections, default_collections):
-  if collections is None:
-    collections = default_collections
-  for key in collections:
-    _ops.add_to_collection(key, val)
-
-
-_INVALID_TAG_CHARACTERS = _re.compile(r'[^-/\w\.]')
-
-
-def _clean_tag(name):
-  # In the past, the first argument to summary ops was a tag, which allowed
-  # arbitrary characters. Now we are changing the first argument to be the node
-  # name. This has a number of advantages (users of summary ops now can
-  # take advantage of the tf name scope system) but risks breaking existing
-  # usage, because a much smaller set of characters are allowed in node names.
-  # This function replaces all illegal characters with _s, and logs a warning.
-  # It also strips leading slashes from the name.
-  if name is not None:
-    new_name = _INVALID_TAG_CHARACTERS.sub('_', name)
-    new_name = new_name.lstrip('/')  # Remove leading slashes
-    if new_name != name:
-      _logging.info(
-          'Summary name %s is illegal; using %s instead.' %
-          (name, new_name))
-      name = new_name
-  return name
-
-
-@_contextlib.contextmanager
-def _summary_scope(name, family=None, default_name=None, values=None):
-  """Enters a scope used for the summary and yields both the name and tag.
-
-  To ensure that the summary tag name is always unique, we create a name scope
-  based on `name` and use the full scope name in the tag.
-
-  If `family` is set, then the tag name will be '<family>/<scope_name>', where
-  `scope_name` is `<outer_scope>/<family>/<name>`. This ensures that `family`
-  is always the prefix of the tag (and unmodified), while ensuring the scope
-  respects the outer scope from this this summary was created.
-
-  Args:
-    name: A name for the generated summary node.
-    family: Optional; if provided, used as the prefix of the summary tag name.
-    default_name: Optional; if provided, used as default name of the summary.
-    values: Optional; passed as `values` parameter to name_scope.
-
-  Yields:
-    A tuple `(tag, scope)`, both of which are unique and should be used for the
-    tag and the scope for the summary to output.
-  """
-  name = _clean_tag(name)
-  family = _clean_tag(family)
-  # Use family name in the scope to ensure uniqueness of scope/tag.
-  scope_base_name = name if family is None else '{}/{}'.format(family, name)
-  with _ops.name_scope(scope_base_name, default_name, values=values) as scope:
-    if family is None:
-      tag = scope.rstrip('/')
-    else:
-      # Prefix our scope with family again so it displays in the right tab.
-      tag = '{}/{}'.format(family, scope.rstrip('/'))
-      # Note: tag is not 100% unique if the user explicitly enters a scope with
-      # the same name as family, then later enter it again before summaries.
-      # This is very contrived though, and we opt here to let it be a runtime
-      # exception if tags do indeed collide.
-    yield (tag, scope)
 
 
 def scalar(name, tensor, collections=None, family=None):
@@ -164,10 +94,11 @@ def scalar(name, tensor, collections=None, family=None):
   Raises:
     ValueError: If tensor has the wrong shape or type.
   """
-  with _summary_scope(name, family, values=[tensor]) as (tag, scope):
+  with _summary_op_util.summary_scope(
+      name, family, values=[tensor]) as (tag, scope):
     # pylint: disable=protected-access
     val = _gen_logging_ops._scalar_summary(tags=tag, values=tensor, name=scope)
-    _collect(val, collections, [_ops.GraphKeys.SUMMARIES])
+    _summary_op_util.collect(val, collections, [_ops.GraphKeys.SUMMARIES])
   return val
 
 
@@ -216,11 +147,12 @@ def image(name, tensor, max_outputs=3, collections=None, family=None):
     A scalar `Tensor` of type `string`. The serialized `Summary` protocol
     buffer.
   """
-  with _summary_scope(name, family, values=[tensor]) as (tag, scope):
+  with _summary_op_util.summary_scope(
+      name, family, values=[tensor]) as (tag, scope):
     # pylint: disable=protected-access
     val = _gen_logging_ops._image_summary(
         tag=tag, tensor=tensor, max_images=max_outputs, name=scope)
-    _collect(val, collections, [_ops.GraphKeys.SUMMARIES])
+    _summary_op_util.collect(val, collections, [_ops.GraphKeys.SUMMARIES])
   return val
 
 
@@ -253,12 +185,13 @@ def histogram(name, values, collections=None, family=None):
     A scalar `Tensor` of type `string`. The serialized `Summary` protocol
     buffer.
   """
-  with _summary_scope(name, family, values=[values],
-                      default_name='HistogramSummary') as (tag, scope):
+  with _summary_op_util.summary_scope(
+      name, family, values=[values],
+      default_name='HistogramSummary') as (tag, scope):
     # pylint: disable=protected-access
     val = _gen_logging_ops._histogram_summary(
         tag=tag, values=values, name=scope)
-    _collect(val, collections, [_ops.GraphKeys.SUMMARIES])
+    _summary_op_util.collect(val, collections, [_ops.GraphKeys.SUMMARIES])
   return val
 
 
@@ -297,14 +230,15 @@ def audio(name, tensor, sample_rate, max_outputs=3, collections=None,
     A scalar `Tensor` of type `string`. The serialized `Summary` protocol
     buffer.
   """
-  with _summary_scope(name, family=family, values=[tensor]) as (tag, scope):
+  with _summary_op_util.summary_scope(
+      name, family=family, values=[tensor]) as (tag, scope):
     # pylint: disable=protected-access
     sample_rate = _ops.convert_to_tensor(
         sample_rate, dtype=_dtypes.float32, name='sample_rate')
     val = _gen_logging_ops._audio_summary_v2(
         tag=tag, tensor=tensor, max_outputs=max_outputs,
         sample_rate=sample_rate, name=scope)
-    _collect(val, collections, [_ops.GraphKeys.SUMMARIES])
+    _summary_op_util.collect(val, collections, [_ops.GraphKeys.SUMMARIES])
   return val
 
 
@@ -330,13 +264,25 @@ def merge(inputs, collections=None, name=None):
   Returns:
     A scalar `Tensor` of type `string`. The serialized `Summary` protocol
     buffer resulting from the merging.
+
+  Raises:
+    RuntimeError: If called with eager mode enabled.
+
+  @compatibility(eager)
+  Not compatible with eager execution. To write TensorBoard
+  summaries under eager execution, use `tf.contrib.summary` instead.
+  @end_compatbility
   """
   # pylint: enable=line-too-long
-  name = _clean_tag(name)
+  if _context.in_eager_mode():
+    raise RuntimeError(
+        'Merging tf.summary.* ops is not compatible with eager execution. '
+        'Use tf.contrib.summary instead.')
+  name = _summary_op_util.clean_tag(name)
   with _ops.name_scope(name, 'Merge', inputs):
     # pylint: disable=protected-access
     val = _gen_logging_ops._merge_summary(inputs=inputs, name=name)
-    _collect(val, collections, [])
+    _summary_op_util.collect(val, collections, [])
   return val
 
 
@@ -351,7 +297,19 @@ def merge_all(key=_ops.GraphKeys.SUMMARIES):
     If no summaries were collected, returns None.  Otherwise returns a scalar
     `Tensor` of type `string` containing the serialized `Summary` protocol
     buffer resulting from the merging.
+
+  Raises:
+    RuntimeError: If called with eager execution enabled.
+
+  @compatibility(eager)
+  Not compatible with eager execution. To write TensorBoard
+  summaries under eager execution, use `tf.contrib.summary` instead.
+  @end_compatbility
   """
+  if _context.in_eager_mode():
+    raise RuntimeError(
+        'Merging tf.summary.* ops is not compatible with eager execution. '
+        'Use tf.contrib.summary instead.')
   summary_ops = _ops.get_collection(key)
   if not summary_ops:
     return None
@@ -373,6 +331,11 @@ def get_summary_description(node_def):
 
   Raises:
     ValueError: if the node is not a summary op.
+
+  @compatibility(eager)
+  Not compatible with eager execution. To write TensorBoard
+  summaries under eager execution, use `tf.contrib.summary` instead.
+  @end_compatbility
   """
 
   if node_def.op != 'TensorSummary':
@@ -384,7 +347,7 @@ def get_summary_description(node_def):
 
 
 _allowed_symbols = [
-    'Summary', 'SummaryDescription', 'Event', 'TaggedRunMetadata', 'SessionLog'
+    'Summary', 'SummaryDescription', 'Event', 'TaggedRunMetadata', 'SessionLog',
 ]
 
 remove_undocumented(__name__, _allowed_symbols)
